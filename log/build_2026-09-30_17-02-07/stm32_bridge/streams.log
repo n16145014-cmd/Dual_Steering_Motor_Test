@@ -1,0 +1,37 @@
+[0.262s] Invoking command in '/home/me813/Steering_Motor_Test/src/stm32_bridge': PYTHONPATH=/home/me813/Steering_Motor_Test/build/stm32_bridge/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/me813/Steering_Motor_Test/install/stm32_bridge/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/stm32_bridge build --build-base /home/me813/Steering_Motor_Test/build/stm32_bridge/build install --record /home/me813/Steering_Motor_Test/build/stm32_bridge/install.log --install-scripts $base/lib/stm32_bridge --single-version-externally-managed install_data
+[0.362s] running egg_info
+[0.362s] creating ../../build/stm32_bridge/stm32_bridge.egg-info
+[0.362s] writing ../../build/stm32_bridge/stm32_bridge.egg-info/PKG-INFO
+[0.362s] writing dependency_links to ../../build/stm32_bridge/stm32_bridge.egg-info/dependency_links.txt
+[0.362s] writing entry points to ../../build/stm32_bridge/stm32_bridge.egg-info/entry_points.txt
+[0.362s] writing requirements to ../../build/stm32_bridge/stm32_bridge.egg-info/requires.txt
+[0.363s] writing top-level names to ../../build/stm32_bridge/stm32_bridge.egg-info/top_level.txt
+[0.363s] writing manifest file '../../build/stm32_bridge/stm32_bridge.egg-info/SOURCES.txt'
+[0.363s] reading manifest file '../../build/stm32_bridge/stm32_bridge.egg-info/SOURCES.txt'
+[0.363s] writing manifest file '../../build/stm32_bridge/stm32_bridge.egg-info/SOURCES.txt'
+[0.363s] running build
+[0.363s] running build_py
+[0.363s] creating /home/me813/Steering_Motor_Test/build/stm32_bridge/build
+[0.363s] creating /home/me813/Steering_Motor_Test/build/stm32_bridge/build/lib
+[0.363s] creating /home/me813/Steering_Motor_Test/build/stm32_bridge/build/lib/stm32_bridge
+[0.363s] copying stm32_bridge/__init__.py -> /home/me813/Steering_Motor_Test/build/stm32_bridge/build/lib/stm32_bridge
+[0.363s] copying stm32_bridge/stm32_bridge_node.py -> /home/me813/Steering_Motor_Test/build/stm32_bridge/build/lib/stm32_bridge
+[0.363s] running install
+[0.363s] running install_lib
+[0.363s] creating /home/me813/Steering_Motor_Test/install/stm32_bridge/lib/python3.10/site-packages/stm32_bridge
+[0.363s] copying /home/me813/Steering_Motor_Test/build/stm32_bridge/build/lib/stm32_bridge/__init__.py -> /home/me813/Steering_Motor_Test/install/stm32_bridge/lib/python3.10/site-packages/stm32_bridge
+[0.363s] copying /home/me813/Steering_Motor_Test/build/stm32_bridge/build/lib/stm32_bridge/stm32_bridge_node.py -> /home/me813/Steering_Motor_Test/install/stm32_bridge/lib/python3.10/site-packages/stm32_bridge
+[0.364s] byte-compiling /home/me813/Steering_Motor_Test/install/stm32_bridge/lib/python3.10/site-packages/stm32_bridge/__init__.py to __init__.cpython-310.pyc
+[0.364s] byte-compiling /home/me813/Steering_Motor_Test/install/stm32_bridge/lib/python3.10/site-packages/stm32_bridge/stm32_bridge_node.py to stm32_bridge_node.cpython-310.pyc
+[0.364s] running install_data
+[0.364s] creating /home/me813/Steering_Motor_Test/install/stm32_bridge/share/ament_index
+[0.364s] creating /home/me813/Steering_Motor_Test/install/stm32_bridge/share/ament_index/resource_index
+[0.364s] creating /home/me813/Steering_Motor_Test/install/stm32_bridge/share/ament_index/resource_index/packages
+[0.364s] copying resource/stm32_bridge -> /home/me813/Steering_Motor_Test/install/stm32_bridge/share/ament_index/resource_index/packages
+[0.364s] copying package.xml -> /home/me813/Steering_Motor_Test/install/stm32_bridge/share/stm32_bridge
+[0.364s] running install_egg_info
+[0.365s] Copying ../../build/stm32_bridge/stm32_bridge.egg-info to /home/me813/Steering_Motor_Test/install/stm32_bridge/lib/python3.10/site-packages/stm32_bridge-0.0.0-py3.10.egg-info
+[0.366s] running install_scripts
+[0.374s] Installing stm32_bridge script to /home/me813/Steering_Motor_Test/install/stm32_bridge/lib/stm32_bridge
+[0.374s] writing list of installed files to '/home/me813/Steering_Motor_Test/build/stm32_bridge/install.log'
+[0.384s] Invoked command in '/home/me813/Steering_Motor_Test/src/stm32_bridge' returned '0': PYTHONPATH=/home/me813/Steering_Motor_Test/build/stm32_bridge/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/me813/Steering_Motor_Test/install/stm32_bridge/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/stm32_bridge build --build-base /home/me813/Steering_Motor_Test/build/stm32_bridge/build install --record /home/me813/Steering_Motor_Test/build/stm32_bridge/install.log --install-scripts $base/lib/stm32_bridge --single-version-externally-managed install_data

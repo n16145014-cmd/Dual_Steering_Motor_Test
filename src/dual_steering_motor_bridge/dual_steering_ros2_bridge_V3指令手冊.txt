@@ -1,0 +1,236 @@
+雙轉向馬達 Motor Command System V3 — 操作與指令手冊
+版本：2026-11-06 / ROS 2 Humble / STM32F407 StartupSafe / BLVD-KRD
+Bridge：dual_steering_ros2_bridge_V3.py
+====================================================================
+
+【先看這裡：每次開始操作的必要順序】
+
+  0. 確認馬達與轉向機構固定、運動範圍無障礙、線束不會被捲入，
+     具備獨立的硬體斷電／急停方式。不要只靠 ROS 2 STOP_ALL。
+  1. 先確認 STM32 與兩顆驅動器正常供電，CANopen Node ID 為 1、2。
+  2. 啟動唯一一個 V3 Bridge（指令見第二節），開啟監看視窗。
+  3. 發送 all;status 與 all;position，確認：
+       CAN=1、SAFE=1、M1_MOVING=0、M2_MOVING=0；
+       M1/M2 能正常回傳 POS、ONLINE/STATUSWORD。
+     操作前也要確認機械上確實靜止，不能只看 MOVING=0。
+  4. 若兩顆 REF_VALID=0：
+       在已確認的機械 0° 位置，且兩顆都未致能時執行 all;sethome。
+       再查 all;position，必須兩顆都 REF_VALID=1。
+     若 REF_VALID=1 且零點仍可信，不必重複 sethome。
+  5. 確認 STOP/READY 狀態適合初始化後，執行 all;enable。
+     必須看到 M1、M2 各自 ENABLE ACKNOWLEDGED，以及
+       OK ENABLE VERIFIED for motors=[1, 2]
+     再用 all;status 確認兩顆 READY=1，並檢查驅動器 Statusword。
+  6. 首次運動只做小角度與低速度，例如 all;A[1,-1];S50；
+     確認 ACCEPT、REACHED、回授位置、真實轉向方向，再逐步加速。
+  7. 操作結束後，在確認機構已停止的條件下使用 all;stop，
+     並查 all;status/探測驅動器狀態；STOP_ALL 不是硬體急停。
+
+  ★ 不可以：剛開機 REF_VALID=0 就直接 all;enable。
+  ★ 不可以：角度命令逾時時立即重送同一個運動命令。
+  ★ 不可以：將 SAFE=1 或 Operation Enabled 視為磁煞車實際狀態證明。
+
+一、適用範圍
+  m1  = 左側 Steering Motor，CANopen Node ID 1
+  m2  = 右側 Steering Motor，CANopen Node ID 2
+  all = 對兩顆馬達依序送出指令（並非精確同步）
+
+  僅控制兩顆 Steering Motor；不含 Driving Hub Motor。
+
+二、啟動與重新啟動 Bridge V3
+  Terminal 1：執行 Bridge（保持視窗開啟）
+    source /opt/ros/humble/setup.bash
+    python3 ~/Dual_Steering_Motor_Test/src/dual_steering_motor_bridge/dual_steering_ros2_bridge_V3.py
+
+  Terminal 2：查看命令結果
+    source /opt/ros/humble/setup.bash
+    ros2 topic echo /motor/result
+
+  Terminal 3：查看 STM32 原始回覆
+    source /opt/ros/humble/setup.bash
+    ros2 topic echo /steering/status
+
+  Terminal 4：發送命令（可選）
+    source /opt/ros/humble/setup.bash
+    ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;status'}"
+
+  重新啟動 Bridge：先確保兩顆馬達已安全停止，
+    在 Terminal 1 按 Ctrl+C，再重新執行上述 python3 命令。
+  不要同時開啟兩個 Bridge 佔用相同 USB UART Port。
+  注意：僅重新啟動 Python Bridge 不必然清除 STM32 RAM 零點；
+        但 STM32 重啟、燒錄、斷電會清除暫存零點，須重新查 REF_VALID。
+
+三、命令格式與速度限制
+  <目標>;<動作>[;<速度>]
+
+  A = Absolute：相對 sethome 零點的絕對目標角度
+  a = Relative：從目前實際角度再移動指定角度
+  注意只有 A/a 以大小寫區分含義；S100/s100 等效。
+
+  角度：目前 Firmware 僅接受整數度；絕對目標 ±180°。
+  速度：V3 Bridge 的 MAX_RPM=1000，允許 S1～S1000；預設 S100。
+        STM32 main.c 的 MAX_TEST_SPEED_RPM 也必須改為 1000 並燒錄，
+        否則 MCU 仍可能拒絕 S301～S1000。
+  速度單位：Profile Velocity (CANopen 0x6081) 的實際物理單位
+        尚需依 BLVD-KRD 設定與實測確認；S1000 不保證為輸出軸 1000 RPM。
+  已實證測試：雙馬達 ±10°、S100、返回零點成功；
+        S1000 尚需逐級實體驗證，不能視為已驗證最高安全速度。
+
+四、查詢、零點、致能與停止
+  m1;position        讀取 M1 實際位置與相對位置
+  m2;position        讀取 M2 實際位置與相對位置
+  all;position       依序讀取 M1 和 M2
+  all;status         查 MCU STATUS，並 PROBE 兩顆 Node
+  m1;status          查 MCU STATUS，並 PROBE M1
+  all;probe          PROBE 兩顆 CANopen Node
+  m1;sethome         M1 當前位置設成暫存 0°（需停止、未致能）
+  m2;sethome         M2 當前位置設成暫存 0°（同上）
+  all;sethome        依序對兩顆建立暫存零點
+  m1;enable          對 M1 發送 INIT
+  m2;enable          對 M2 發送 INIT
+  all;enable         依序 INIT M1、M2，最後驗證 READY 與 CiA402 狀態
+  all;stop           向 STM32 發 STOP_ALL／Quick Stop（非認證 E-stop）
+
+  確認標準：
+    all;position 的兩顆 REF_VALID=1
+    all;enable 後 /motor/result 出現：
+      OK M1 ENABLE ACKNOWLEDGED ...
+      OK M2 ENABLE ACKNOWLEDGED ...
+      OK ENABLE VERIFIED for motors=[1, 2] ...
+    all;status 查得 M1_READY=1、M2_READY=1；
+      CiA402 Statusword 以 0x006F 遮罩應等於 0x0027（Operation Enabled）。
+
+  StartupSafe Firmware 的 SAFE=1 表示軟體狀態檢查通過；
+  即使 SAFE=1，也不能證明實際磁煞車接合／釋放或機械已安全停止。
+  ZERO 只修改 STM32 RAM，不會自動尋機械原點、不會移動馬達。
+  ZERO 在馬達已致能時會被 MCU 拒絕。
+
+五、絕對角度 A
+  m1;A10;S100            M1 到 +10°，速度設定值 100
+  m2;A-10;S100           M2 到 -10°，速度設定值 100
+  m1;A0;S50             M1 回到軟體零點
+  all;A10;S100           兩顆都到 +10°
+  all;A[10,-10];S100     M1 +10°、M2 -10°（實測成功的形式）
+  all;A[10,-10];S[80,100]  M1 設定 80、M2 設定 100
+  all;A[10,-10];S1000    高速測試命令（只在兩端均允許且完成安全驗證後）
+
+六、相對角度 a
+  m1;a10;S100            M1 從實際位置再 +10°
+  m2;a-10;S100           M2 從實際位置再 -10°
+  all;a10;S100           兩顆各自再 +10°
+  all;a[10,-10];S[50,70] M1 再 +10°、M2 再 -10°
+
+  Bridge 在相對移動前會要求新的 M#:POS，確認 REF_VALID=1、
+  MOVING=0，並將相對目標換算成整數度絕對目標。
+  若目前角度不是整數，可能量化並發出 WARN；不是精密位置模式。
+  all 指令會先檢查兩顆位置、角度界限，再依序發送；不是原子交易。
+
+七、回到軟體零點 Home
+  m1;home                 M1 回 0°（預設 S100）
+  m2;home;S50             M2 回 0°，S50
+  all;home;S100           兩顆回 0°
+  all;home;S[50,80]       M1 S50、M2 S80
+
+  home 是「運動回到已儲存零點」，不是重新建立零點。
+  sethome 是「把當下位置設為零點」，不執行運動。
+  若 REF_VALID=0，應先檢查真正機械零點，再 sethome；不可直接 home。
+
+八、目前明確不支援的指令
+  m1;stop                 目前只有 all;stop（STOP_ALL）
+  m1;disable              目前沒有獨立 disable
+  all;brakeon             沒有獨立電磁煞車接合控制
+  m1;brakeoff             沒有獨立電磁煞車釋放控制
+  m1;jog;dir=+;S10        沒有安全的按住式 Jog／dead-man watchdog
+  m2;jogstop              同上
+
+  Operation Enabled 不是獨立的磁煞車感測結果。
+  Quick Stop、軟體看門狗與 ROS 2 Stop 都不是認證硬體 E-stop。
+
+九、常見問題與處理流程
+  A. ERR INIT: ZERO + HEARTBEAT REQUIRED
+     先查 all;position：若 REF_VALID=0，確保未致能且機械位置正確，
+     再 all;sethome。若 REF_VALID=1，檢查 HB 時序、CAN、MOVING。
+     不要移除 STM32 的 2 秒 Heartbeat 保護。
+
+  B. REF_VALID=0，REL_STEPS=0
+     表示尚未建立有效軟體零點；REL_STEPS=0 此時不代表真實機械 0°。
+     燒錄／STM32 重啟後常見。確認機械位置後再 sethome。
+
+  C. STATUS CAN=1 M1_READY=0 M2_READY=0 SAFE=1
+     表示通訊和韌體停止檢查可能正常，但未致能；
+     應先核對兩顆 Statusword 與 REF_VALID，而不是直接給角度命令。
+
+  D. ERR UART RESPONSE TIMEOUT: M2:A-90,S300 等
+     回覆逾時 ≠ 指令一定未執行。先用獨立停止措施確認實際停止，
+     然後查 all;status、all;position；不要立刻重送同一角度。
+     檢查 STM32 UART IRQ/Ring Buffer、CAN SDO 和 Bridge TX/RX Log。
+
+  E. ERR FORMAT use M1: or M2:
+     STM32 收到不合格式或損壞的命令；檢查 UART TX/RX、
+     UART IRQ、線路接地與鮑率、是否有其他程式佔用 Port。
+     若反覆出現，暫停運動測試並排查通訊。
+
+  F. ERROR / TIMEOUT / SAFE=0
+     不繼續 enable 或運動；確認實際停止，先處理電源、CAN、
+     驅動器告警與韌體停止驗證。SAFE=1 不是硬體安全證明。
+
+  G. all;stop 後要重新運動
+     先查 all;status 和驅動器 Statusword；Quick Stop 會改變驅動器狀態。
+     若需重新致能，須依當前狀態和製造商規範進行；
+     只有在 REF_VALID 仍有效且機械基準未變時才可沿用原零點。
+
+十、ROS 2 Topics
+  /motor/command               std_msgs/msg/String             V3 分號指令
+  /motor/result                std_msgs/msg/String             QUEUED/OK/ERR/WARN
+  /steering/status             std_msgs/msg/String             MCU 原始回覆
+  /steering/control            std_msgs/msg/String             舊控制介面
+  /steering/command            std_msgs/msg/Float64MultiArray [M1,M2]
+  /left_steering/command_deg   std_msgs/msg/Float64
+  /right_steering/command_deg  std_msgs/msg/Float64
+  /left_steering/feedback_deg  std_msgs/msg/Float64
+  /right_steering/feedback_deg std_msgs/msg/Float64
+
+  /motor/result 的 QUEUED 表示排入佇列，不代表動作完成；
+  OK COMMAND COMPLETED 可能只表示指令收到／運動已接受，
+  機械是否到位仍須確認 /steering/status 的 REACHED 與實際位置回授。
+
+十一、常用命令的直接複製版本
+  查狀態：
+    ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;status'}"
+  查位置：
+    ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;position'}"
+  建零點（確認失能、機械位置正確）：
+    ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;sethome'}"
+  致能：
+    ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;enable'}"
+  小角度測試：
+    ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;A[1,-1];S50'}"
+  依測試紀錄的 ±10°：
+    ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;A[10,-10];S100'}"
+  回零：
+    ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;home;S100'}"
+  Quick Stop：
+    ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;stop'}"
+
+  可選 shell function（只在目前 Terminal 有效）：
+    motorcmd() {
+      ros2 topic pub --once /motor/command std_msgs/msg/String "{data: '$*'}"
+    }
+  使用例：
+    motorcmd 'all;status'
+    motorcmd 'all;sethome'
+    motorcmd 'all;enable'
+    motorcmd 'all;A[1,-1];S50'
+    motorcmd 'all;stop'
+
+十二、目前實作限制與待驗證項目
+  - 軟體零點只存在 STM32 RAM；不是絕對編碼器／自動尋原點。
+  - 20000 steps/° 與 0x6081 的實際速度單位，仍須外部實測校正。
+  - Bridge V3 MAX_RPM=1000；MCU 也要燒錄相同測試限制。
+  - STM32 心跳逾時約 2 秒；CANopen SDO 仍可能阻塞。
+  - UART IRQ/Ring Buffer 改善接收可靠性，但不保證不再發生逾時。
+  - StartupSafe SAFE=1 僅為程式檢查，不等於安全認證／磁煞感測。
+  - all;enable、all;A[...] 均為依序執行，不是同步閉環雙軸控制。
+  - 這仍是 bench test 架構；尚須驗證限位、線束、負載、長時間運作。
+
+====================================================================
