@@ -1,0 +1,11 @@
+/build/
+/install/
+/log/
+**/__pycache__/
+*.py[cod]
+*.asv
+*.autosave
+*.m~
+/matlab_simulation/FarmSimulation/
+/matlab_simulation/Legacy/
+/matlab_simulation/.git/

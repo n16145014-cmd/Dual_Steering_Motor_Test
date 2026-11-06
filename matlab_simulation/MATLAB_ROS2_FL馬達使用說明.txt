@@ -1,0 +1,240 @@
+MATLAB → ROS 2 → STM32 → FL 轉向馬達 使用說明
+記錄日期：2026-10-01
+
+一、用途與目前設定
+
+執行 WeedingRobot_KinematicsModel_ROS2_Test.m，手動輸入 vx、vy、w，
+由運動學模型計算四輪轉向角，將 FL（左前輪）的角度送給實體轉向馬達。
+目前只控制一顆 FL 轉向馬達，不驅動行走輪，也不控制另外三顆轉向馬達。
+原始 WeedingRobot_KinematicsModel.m 保持不變。
+
+專案位置：/home/me813/Steering_Motor_Test
+MATLAB 資料夾：/home/me813/Steering_Motor_Test/matlab_simulation
+ROS 2：Humble
+MATLAB：R2024b，需安裝 ROS Toolbox
+bridge：stm32_bridge
+串口：/dev/ttyUSB0，115200 baud
+ROS_DOMAIN_ID：本次已驗證為 0；MATLAB 與 bridge 必須一致。
+
+命令 topic：/steering_cmd
+命令型別：std_msgs/msg/String
+命令格式：A<整數角度>,S500
+回報 topic：/steering_feedback
+回報型別：std_msgs/msg/String
+
+四輪模型輸出 topic：/matlab/steering_angles_deg
+型別：std_msgs/msg/Float64MultiArray
+資料順序：[FL, FR, RL, RR]，單位為度。
+
+二、角度、速度與零點的定義
+
+1. FL 角度來自 delta(1)，是輪子相對側車架的局部轉向角。
+   MATLAB 使用 rad2deg(delta(1)) 轉為度，再四捨五入為整數。
+   例如：43.234° → A43,S500。
+
+2. A10 表示轉到軟體零點起算的 10°，不是再轉 10°。
+   例如目前在 5°，送 A10,S500，目標是 10°。
+
+3. 韌體在 STM32 上電初始化時記錄驅動器目前位置作為軟體零點。
+   SAVE 會重新定義零點。測試程式不會自動發送 SAVE 或 HOME。
+   軟體零點需對應模型的 delta=0；上電零點不等同實體感測器尋零。
+   STM32 重啟後，須重新確認零點是否仍符合預期。
+
+4. 換算：36000 steps/rev × 200 減速比 ÷ 360 = 20000 steps/輸出軸度。
+   STM32 負責把角度換成位置步數，MATLAB 不需要再乘 20000。
+   例如 45° 對應相對零點 900000 steps。
+
+5. S500 是韌體的速度欄位，送入驅動器的 profile velocity。
+   它不是 MATLAB 算出的行走輪轉速，也不是輸出軸每秒 500°。
+
+三、啟動前準備
+
+1. 確認 STM32、馬達驅動器與相關電源已開啟，USB/UART、CAN 接線已接好。
+2. 使用支援 A角度,S速度、POS 的 v2 韌體。
+3. 確認轉動範圍內沒有障礙物，且目前零點已知。
+4. 不要同時執行 stm32_monitor.py、stm32_uart_test.py 或其他占用串口的程式。
+5. 馬達測試期間只使用一個命令發布端，避免回報與其他命令混在一起。
+
+四、終端 A：確認或啟動 bridge
+
+開啟終端，執行：
+
+source /opt/ros/humble/setup.bash
+source /home/me813/Steering_Motor_Test/install/setup.bash
+export ROS_DOMAIN_ID=0
+ros2 node list
+
+如果已看到 /stm32_bridge，不要重複啟動。
+如果沒有，執行：
+
+ros2 run stm32_bridge stm32_bridge
+
+正常啟動會顯示：
+STM32 steering bridge started: Axx,Sxx | HOME,Sxx | POS | SAVE
+
+保持此終端開啟。它會顯示命令、STM32 原始回覆及逾時訊息。
+
+串口權限說明：
+本次已將 me813 加入 dialout 群組，不必重複加入。
+一般需登出再登入，新的登入環境才會套用群組。
+若現有終端仍出現 Permission denied，可執行：
+
+newgrp dialout
+
+然後重新執行本節的 source、export 與啟動命令。
+
+五、終端 B：觀察回報
+
+另外開啟一個終端，執行：
+
+source /opt/ros/humble/setup.bash
+export ROS_DOMAIN_ID=0
+ros2 topic echo /steering_feedback
+
+保持此終端開啟，以觀察位置查詢及轉動完成回報。
+
+六、MATLAB：執行控制
+
+在 MATLAB Command Window 執行：
+
+cd('/home/me813/Steering_Motor_Test/matlab_simulation')
+setenv('ROS_DOMAIN_ID','0')
+edit WeedingRobot_KinematicsModel_ROS2_Test.m
+
+確認測試檔中的設定：
+
+steeringROS.mode = "motor";
+steeringROS.domainID = [];
+steeringROS.speedRPM = 500;
+steeringROS.timeoutSec = 40;
+steeringROS.toleranceDeg = 1;
+
+domainID=[] 表示使用 MATLAB 的 ROS_DOMAIN_ID 環境變數。
+timeoutSec 是等待單筆回報的上限；toleranceDeg 是對整數目標的容許誤差。
+
+按 Run 執行整個檔案，或在 Command Window 執行：
+
+WeedingRobot_KinematicsModel_ROS2_Test
+
+程式會依序要求輸入：
+
+Enter vx [m/s]:
+Enter vy [m/s]:
+Enter w (yaw rate) [rad/s]:
+
+vx：車體前向速度，m/s。
+vy：車體側向速度，m/s，正方向為車體左方。
+w：車體偏航角速度，rad/s，不是馬達轉速。
+每次輸入一個有限實數，例如 0.5，按 Enter。
+請輸入數值，不要輸入算式；NaN、Inf 或空白會要求重新輸入。
+
+七、建議的手動測試順序
+
+以下範例適用於檔案目前的被動關節角度 phi_L=phi_R=0，且 w=0。
+
+測試 1：FL 目標約 5°（本次實機已驗證）
+vx = 0.5
+vy = 0.043744331762962
+w  = 0
+預期命令：A5,S500
+
+測試 2：FL 目標約 10°
+vx = 0.5
+vy = 0.08816349
+w  = 0
+預期命令：A10,S500
+
+測試 3：回到軟體零點 0°
+vx = 0.5
+vy = 0
+w  = 0
+預期命令：A0,S500
+
+每次跑完整個檔案只送一筆轉向目標；收到完成回報後，再跑下一次。
+這些 vx、vy、w 只用於計算轉向角，目前不會讓行走輪轉動。
+
+八、程式執行流程與成功判斷
+
+程式依序：
+1. 計算與繪製模型，發布四輪角度到 /matlab/steering_angles_deg。
+2. 發送 POS，確認 ROS 2 → bridge → STM32 → 驅動器位置回報可用。
+3. POS 成功後，顯示目前角度與目標命令。
+4. 發送 A<FL 整數角度>,S500。
+5. 等待對應角度與速度的 MOVE 回報，核對位置誤差。
+
+MATLAB 正常輸出範例：
+
+Sent /steering_cmd: POS
+Current FL position: 0.000 deg; model: 5.000 deg; command: A5,S500
+Sent /steering_cmd: A5,S500
+FL move complete: STATUS=OK MODE=MOVE CMD_DEG=5 ACT_DEG=4.999 ...
+
+回報欄位：
+CMD_DEG：發送的整數目標角度。
+ACT_DEG：STM32/bridge 回報的實際輸出軸角度。
+ERROR_DEG：CMD_DEG - ACT_DEG。
+SPEED_RPM：命令速度欄位，本次為 500。
+ACT_POS：驅動器讀回的位置值。
+REL_STEPS：相對上電/SAVE 零點的位置步數。
+
+本次實測記錄：
+命令 A5,S500；ACT_DEG=4.999；ERROR_DEG=0.001；REL_STEPS=99988。
+這是本次量測結果，不代表每次都會有相同誤差。
+
+MATLAB 工作區的 steeringMotorResult 保存 modelDeg、commandDeg、command、
+beforeDeg、actualDeg、errorDeg、feedback 及 completed 等結果。
+成功時 completed=true。
+
+九、只測試 ROS 2，不轉動馬達
+
+將測試檔設定改成：
+
+steeringROS.mode = "topic";
+
+再執行檔案並輸入 vx、vy、w。
+此模式只發布四輪角度，不發送 POS 或轉向命令。
+可在已載入 ROS 2 環境的終端執行：
+
+ros2 topic echo /matlab/steering_angles_deg std_msgs/msg/Float64MultiArray --qos-durability transient_local --once
+
+資料順序為 FL、FR、RL、RR，單位為度。
+MATLAB 保留發布物件期間，較晚加入的訂閱端也可收到最後一筆資料。
+要恢復實體控制，將 mode 改回 "motor"。
+
+十、常見問題
+
+1. Permission denied: /dev/ttyUSB0
+   檢查 dialout 群組是否已套用；重新登入或在終端執行 newgrp dialout。
+
+2. 找不到 /dev/ttyUSB0
+   檢查 USB 是否接好，執行 ls -l /dev/ttyUSB*。
+   目前 bridge 固定使用 /dev/ttyUSB0；若裝置編號改變，須先確認正確串口。
+
+3. ERR TIMEOUT CMD=POS
+   bridge 已送出查詢，但未收到 STM32 的 OK/ERR 回覆。
+   檢查驅動器電源、UART/CAN 接線、韌體版本與初始化狀態。
+   v2 韌體初始化失敗可能停在錯誤迴圈，無法處理 POS。
+   POS 失敗時，MATLAB 不會接著發送轉動命令。
+
+4. MATLAB 收不到回報
+   確認 /stm32_bridge 存在，且 MATLAB 與 bridge 的 ROS_DOMAIN_ID 一致。
+   同時查看 bridge 終端與 /steering_feedback 的輸出。
+
+5. ERR MOVE 或角度誤差超過設定
+   查看 bridge 回報中的驅動器狀態與 CAN 錯誤資訊。
+   程式不會自動重送；查明原因後再決定下一步。
+
+6. 小數角度與馬達目標不同
+   目前韌體只接受整數角度，程式會四捨五入。
+   容許誤差是相對四捨五入後的目標，不是原始小數角度。
+
+十一、結束操作
+
+1. 若要回零，依第七節輸入 0° 範例並等到完成回報。
+2. 確認動作完成後，可在自行啟動的 bridge 終端按 Ctrl+C 結束 bridge。
+3. 回報監看終端也可按 Ctrl+C 結束。
+4. 關閉 MATLAB 或清除 ROS 2 物件會結束 MATLAB 端連線。
+
+注意：停止 MATLAB、關閉 bridge 或等待逾時，不等於向驅動器發送停止命令。
+馬達收到的動作可能仍會繼續；需要立即停止時，使用實體系統的停止方式。
+韌體允許的角度範圍不代表實際機構一定能在整個範圍內轉動。
