@@ -1,0 +1,19 @@
+# MATLAB autosave / backup
+*.asv
+*.m~
+*.autosave
+
+# MATLAB temporary files
+*.tmp
+
+# Simulink generated files
+slprj/
+*_grt_rtw/
+*_ert_rtw/
+
+# Code generation
+codegen/
+
+# Windows
+Thumbs.db
+Desktop.ini
