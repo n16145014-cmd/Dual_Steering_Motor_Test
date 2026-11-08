@@ -1,215 +1,283 @@
-# Dual Steering Motor — ROS 2 Bridge V3 操作手冊
+# Four Steering Motors — ROS 2 控制系統操作手冊
 
-> **系統版本**：ROS 2 Humble / STM32F407 / CANopen / BLVD-KRD / `dual_steering_ros2_bridge_V3.py`  
-> **適用範圍**：兩顆轉向馬達的實驗台架控制；不包含行走輪馬達。  
-> **重要安全提醒**：`all;stop` 是 CANopen Quick Stop 請求，**不是硬體緊急停止**。操作前必須固定機構、確認旋轉空間，並具備獨立硬體斷電／緊急停止方式。
+> **文件版本**：2026-11-08（依目前三個 Python 節點的程式碼與已提供的台架測試記錄整理）  
+> **運行環境**：Ubuntu / ROS 2 Humble / 兩塊 STM32F407 / CANopen / 四台 BLVD-KRD / 四顆 BLMR6200SKM-GFV-F + GFV6G200  
+> **適用範圍**：四顆**轉向**馬達的實驗台架；不包括四顆驅動輪轂馬達或自主轉向控制器。  
+> **安全限制**：`all;stop` 只是要求 STM32 發送 **Quick Stop**，不是安全認證的 E-stop，也不能保證驅動器已失能。測試必須有獨立硬體停止方式、機械固定與淨空。
 
-## 1. 系統介紹
-
-ROS 2 將角度／查詢指令發布到 `/motor/command`；Python Bridge V3 透過 USB-UART（115200 baud）與 STM32F407 通訊；STM32 再透過 CAN1（500 kbit/s）對兩顆 BLVD-KRD 發送 CANopen / CiA402 指令。
-
-```text
-ROS 2 Humble (NUC)
-      │ /motor/command
-      ▼
-dual_steering_ros2_bridge_V3.py
-      │ USB-UART, 115200 baud
-      ▼
-STM32F407（StartupSafe Firmware）
-      │ CAN1, 500 kbit/s
-      ├── Node ID 1 → M1：左轉向馬達
-      └── Node ID 2 → M2：右轉向馬達
-```
-
-| 目標 | 說明 |
-|---|---|
-| `m1` | 左轉向馬達，CANopen Node ID 1 |
-| `m2` | 右轉向馬達，CANopen Node ID 2 |
-| `all` | 對 M1、M2 依序執行；**不保證精確同步** |
-
-目前 Bridge 支援絕對與相對角度、位置讀取、暫時零點、雙馬達致能、狀態查詢與 Quick Stop。`sethome` 僅把當前位置設為 **STM32 RAM 中的暫時零點**，不是自動尋找真實機械零點；STM32 重新啟動／重新燒錄後必須重新建立。
-
-## 2. 啟動 Bridge V3
-
-先確認 STM32、兩顆 BLVD-KRD、CAN 與 USB-UART 已正確連接，且舊 Bridge 已停止（不可有兩個程式同時開啟同一個 UART Port）。
-
-**Terminal 1 — 啟動 Bridge**
-
-```bash
-source /opt/ros/humble/setup.bash
-python3 ~/Dual_Steering_Motor_Test/src/dual_steering_motor_bridge/dual_steering_ros2_bridge_V3.py
-```
-
-正常會看到類似 `Connected: /dev/serial/by-id/usb-1a86_USB2.0-Serial-if00-port0`、`Motor Command V1 ready: /motor/command`；這裡的 `Motor Command V1` 是程式內部訊息文字，不代表啟動的是舊 V1 檔案。
-
-若已在執行，先在 Terminal 1 按 `Ctrl+C`，再重新執行上述指令。**僅重啟 Python Bridge 通常不會清除 STM32 的 RAM 零點；STM32 重新啟動則會。** 不要在馬達運動中重啟 Bridge。
-
-## 3. 兩個關鍵監控 Topic
-
-另開兩個 Terminal，並在每個 Terminal 先執行 `source /opt/ros/humble/setup.bash`。
-
-**Terminal 2 — 指令處理結果 `/motor/result`**
-
-```bash
-source /opt/ros/humble/setup.bash
-ros2 topic echo /motor/result
-```
-
-用來確認 Bridge 是否排入／接受指令，或回報錯誤，例如：
+## 1. 目前使用的三節點架構
 
 ```text
-QUEUED ENABLE motors=[1, 2]
-OK M1 ENABLE ACKNOWLEDGED (brake state not independently sensed)
-OK M2 ENABLE ACKNOWLEDGED (brake state not independently sensed)
-OK ENABLE VERIFIED for motors=[1, 2] (CiA402 status only; physical brake unverified)
+ROS 2 Controller / Terminal / HMI
+            │ /steering/four/command  (std_msgs/String)
+            ▼
+ dual_steering_ros2_bridge_V5.py
+   /four_motor_router_v5
+            │ 分派命令、轉發結果（不碰 UART）
+      ┌─────┴─────────────┐
+      ▼                   ▼
+ bridge_sidea.py       bridge_sideb.py
+ /bridge_side_a        /bridge_side_b
+      │                   │
+      │ USB-UART          │ USB-UART (115200 baud)
+      ▼                   ▼
+ STM32 #1              STM32 #2
+      │ CAN1 500 kbps     │ CAN1 500 kbps
+      ├ Node 1           ├ Node 3
+      └ Node 2           └ Node 4
 ```
 
-**Terminal 3 — STM32 原始狀態 `/steering/status`**
+**重要**：`bridge_sideb.py` 直接匯入 `bridge_sidea.py` 的 `main`，因此兩側運行**相同的 `MotorBridge` 類別**；差異在 Side 名稱、串口、Node ID 配置。`bridge_sidea.py` 和 `bridge_sideb.py` 必須放在同一目錄。
+
+### 1.1 各程式的職責
+
+| 程式 | 職責 | 不負責 |
+|---|---|---|
+| `dual_steering_ros2_bridge_V5.py` | 解析四顆馬達命令、全域/本地編號映射、向兩側 Topic 分派、轉發結果與狀態 | Heartbeat、UART、CANopen、跨側同步、動作到位驗證 |
+| `bridge_sidea.py` | 共用的 V4 類型 Bridge 核心，UART、Heartbeat、命令佇列、POS 讀取、Enable/Zero、CiA402 查詢 | 四顆跨側同步控制 |
+| `bridge_sideb.py` | 用 Side B 參數啟動相同的 Bridge 核心 | 維護第二份獨立的控制邏輯 |
+| STM32 韌體 | CANopen 指令、安全監控與暫時零點 | 經獨立安全認證的 E-stop |
+
+不要同時啟動舊的 V3、V4、V5.1 或其他會佔用相同 UART／訂閱同一控制 Topic 的程式。
+
+## 2. 馬達編號與交換配置
+
+**預設配置**：
+
+| V5 全域編號 | Side | Bridge 本地編號 | CANopen Node ID |
+|---|---|---|---|
+| `m1` | Side A | `m1` | Node 1 |
+| `m2` | Side A | `m2` | Node 2 |
+| `m3` | Side B | `m1` | Node 3 |
+| `m4` | Side B | `m2` | Node 4 |
+
+**Side B 透過 UART 發送的仍是 `M1:`、`M2:`**，不是 `M3:`、`M4:`；STM32 驅動器回覆中的實際 Node ID 則可為 3、4。V5 對外使用全域 `m1`～`m4`。
+
+可以對調 Side A/Side B 所管理的 Node **組**（`1,2` 與 `3,4`），但三處必須一致：
+
+1. Side A/Side B 的 `-p node_ids:=...`；
+2. V5 的 `-p side_a_nodes:=...`、`-p side_b_nodes:=...`；
+3. 實際連接的 STM32 韌體 CANopen Node ID 及實體接線。
+
+單純改 ROS 2 參數**不會**改變 STM32 韌體中的 CANopen Node ID。
+
+## 3. 啟動流程（預設 Node 1/2、3/4）
+
+在馬達**已安全停止**時，先停止舊 Bridge。啟動前檢查串口：
+
+```bash
+ls -l /dev/serial/by-path/
+```
+
+以下路徑是目前測試電腦曾使用的範例，USB 插孔或拓樸更動後應重新確認，不要僅依 `ttyUSB0/1` 猜測：
+
+**Terminal A — Side A**
 
 ```bash
 source /opt/ros/humble/setup.bash
-ros2 topic echo /steering/status
+cd ~/Dual_Steering_Motor_Test/src/dual_steering_motor_bridge
+python3 bridge_sidea.py --ros-args \
+  -r __node:=bridge_side_a \
+  -p node_ids:=1,2 \
+  -p port:=/dev/serial/by-path/pci-0000:80:14.0-usb-0:8.2:1.0-port0
 ```
 
-用來確認 `STATUS`、`STATUSWORD`、`REF_VALID`、`MOVING`、`ACCEPT`、`REACHED`，例如：
+**Terminal B — Side B**
+
+```bash
+source /opt/ros/humble/setup.bash
+cd ~/Dual_Steering_Motor_Test/src/dual_steering_motor_bridge
+python3 bridge_sideb.py --ros-args \
+  -r __node:=bridge_side_b \
+  -p node_ids:=3,4 \
+  -p port:=/dev/serial/by-path/pci-0000:80:14.0-usb-0:8.3:1.0-port0
+```
+
+**Terminal C — V5 Simple Router**
+
+```bash
+source /opt/ros/humble/setup.bash
+cd ~/Dual_Steering_Motor_Test/src/dual_steering_motor_bridge
+python3 dual_steering_ros2_bridge_V5.py
+```
+
+如果路由檔案已重新命名為 `V5.py`，將最後一行換成 `python3 V5.py`，勿同時運行兩個 Router。
+
+**核對三個節點**：
+
+```bash
+ros2 node list
+ros2 topic info /steering/side_a/motor/command -v
+ros2 topic info /steering/side_b/motor/command -v
+```
+
+預期節點：
 
 ```text
-STATUS CAN=1 M1_READY=0 M2_READY=0 M1_MOVING=0 M2_MOVING=0 SAFE=1
-OK M1 POS ACT_POS=1024 REL_STEPS=0 REF_VALID=1 MOVING=0
-OK M2 POS ACT_POS=802917 REL_STEPS=0 REF_VALID=1 MOVING=0
+/bridge_side_a
+/bridge_side_b
+/four_motor_router_v5
 ```
 
-**判讀重點**：
+每側命令 Topic 預期一個 Router publisher、一個 Bridge subscriber。只檢查 Topic 連接不代表驅動器已 Enable。
 
-| 欄位 | 意義 |
-|---|---|
-| `CAN=1` | STM32 內部認為 CAN Bus 已啟動 |
-| `SAFE=1` | StartupSafe 軟體狀態檢查通過；**不代表安全認證或物理煞車已驗證** |
-| `REF_VALID=1` | 已在 STM32 RAM 設定暫時零點 |
-| `M1_READY=1` / `M2_READY=1` | STM32 將對應馬達標記為已致能 |
-| `MOVING=0` | STM32 沒有標記該馬達正在運動；仍應確認機械已實際停止 |
-| `STATUSWORD` | BLVD-KRD 的 CiA402 狀態。`(STATUSWORD & 0x006F)==0x0027` 為 Operation Enabled |
+### 3.1 Node 組交換範例
 
-## 4. 每次使用前的正確順序（必讀）
-
-1. **確保馬達固定、可獨立安全停止、機構確實停止。** 上電後先不要直接下達角度命令。
-2. 啟動 **Bridge V3**，並打開 `/motor/result` 和 `/steering/status` 兩個監控視窗。
-3. 發送 `all;status` 和 `all;position`：檢查 `CAN=1`、`SAFE=1`、兩顆 `MOVING=0`，以及各自的 `REF_VALID`。
-4. **僅當 `REF_VALID=0` 時才需重新設零點**：如果輪子已對準希望定義的正前方，且兩顆驅動器處於未致能／安全停止狀態，發送 `all;sethome`。確認兩顆都回覆 `OK M# ZERO`，之後 `REF_VALID=1`。
-5. 發送 `all;enable`，確認 `/motor/result` 有 `OK ENABLE VERIFIED for motors=[1, 2]`，再用 `all;status` 核對 `M1_READY=1`、`M2_READY=1`。
-6. 先用已驗證的小角度與低速度測試，例如 `all;A[1,-1];S50` 或 `all;A[10,-10];S100`；觀察 `ACCEPT`、`REACHED`、實際位置及 `MOVING`。
-7. 完成後回到指定角度（例如 `all;home;S100`），等待兩顆實際停止。需要停止時使用 `all;stop`，但硬體急停必須獨立可用。
-
-**重要：`all;enable` 之前必須已建立零點。** 若 `REF_VALID=0`，會出現 `ERR INIT: ZERO + HEARTBEAT REQUIRED`。如果已經設定零點、且 STM32 沒重新啟動，通常不必再執行 `sethome`。
-
-### 輪子開機時不是正前方，怎麼辦？
-
-不能直接把歪斜角度當成正式機械零點。台架調整時可以：先建立**臨時零點** → `all;enable` → 低速小角度調整至真實正前方 → 確認實際停止並使驅動器處於允許 `ZERO` 的未致能狀態 → 再 `all;sethome` 建立**正式零點** → 重新 `all;enable`。
-
-**注意**：目前 `sethome` 在 `motor_ready=1` 時會被拒絕；`all;stop` 只請求 Quick Stop，不能單憑其回覆認定已完成安全失能。務必核對實際驅動器 CiA402 狀態、機構位置與煞車保持狀態，再重新建立零點。長期建議使用絕對角度編碼器或原點感測器。
-
-## 5. Command 指令表
-
-**發送格式**：
+當實際 Side A 的 STM32 改為 Node 3、4，Side B 改為 Node 1、2，兩側 Bridge 的 `node_ids` 對調，V5 改用：
 
 ```bash
-ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;status'}"
+python3 dual_steering_ros2_bridge_V5.py --ros-args \
+  -p side_a_nodes:=3,4 \
+  -p side_b_nodes:=1,2
 ```
 
-指令本體格式：`目標;動作[;速度]`。只有 `A`／`a` 區分大小寫：`A` = 絕對目標角度；`a` = 從當前實際角度增量移動。
+此時 V5 全域 `m3`、`m4` 會送到 Side A，`m1`、`m2` 會送到 Side B；**Node 編號不等於車輪在機器人上的幾何位置**。應另外記錄實際前左／前右／後左／後右對應關係。
 
-| Command | 功能 |
-|---|---|
-| `all;status` | 查詢 STM32 狀態並讀取兩顆驅動器 Statusword |
-| `all;position` | 查詢兩顆實際位置、相對 Steps、零點有效性與運動標記 |
-| `m1;position`、`m2;position` | 分別查詢單顆馬達位置 |
-| `all;probe` | 確認 M1、M2 CANopen 節點在線 |
-| `all;sethome` | 將兩顆當前位置設為暫時零點（限允許的未致能狀態） |
-| `m1;sethome`、`m2;sethome` | 單獨設定一顆暫時零點 |
-| `all;enable` | 依序 M1 → M2 致能，並驗證 CiA402 Operation Enabled |
-| `m1;enable`、`m2;enable` | 單顆致能 |
-| `all;A[10,-10];S100` | M1 轉到 +10°，M2 轉到 −10°，設定速度 100 |
-| `all;A[10,-10];S[100,200]` | 兩顆指定不同速度 |
-| `m1;A0;S100` | M1 回到目前設定的零點 |
-| `all;A0;S100` | 兩顆均移動至相對零點 |
-| `m1;a10;S100` | M1 從當前位置再增加 10° |
-| `all;a[10,-10];S100` | M1 從當前再 +10°，M2 再 −10° |
-| `all;home;S100` | 兩顆返回暫時零點（等價目標 `A0`） |
-| `all;stop` | 對兩顆要求 Quick Stop；**不是硬體急停** |
+## 4. ROS 2 Topics
 
-**限制**：目前只支援整數角度；絕對角度目標範圍為 −180°～+180°。V3 Bridge 的 `MAX_RPM=1000`，允許 `S1`～`S1000`，預設 `S100`。**STM32 必須也將 `MAX_TEST_SPEED_RPM` 設為 1000 並燒錄**，否則高於 300 的速度可能被拒絕。`S1000` 是寫入 CANopen `0x6081` 的設定值，物理單位尚待校正，不能直接認定為輸出軸 1000 RPM。依目前韌體假設，`20000 steps ≈ 輸出軸 1°`，實際輸出角度仍須外部量測驗證。
+| Topic | 型別 | 說明 |
+|---|---|---|
+| `/steering/four/command` | `std_msgs/msg/String` | 唯一建議的四馬達控制入口 |
+| `/steering/four/result` | `std_msgs/msg/String` | V5 路由與兩側 V4 的結果 |
+| `/steering/four/status` | `std_msgs/msg/String` | V5 加註 `side_a:` / `side_b:` 的 MCU 原始回覆 |
+| `/steering/side_a/motor/command` | `std_msgs/msg/String` | Side A 的兩馬達控制命令 |
+| `/steering/side_b/motor/command` | `std_msgs/msg/String` | Side B 的兩馬達控制命令 |
+| `/steering/side_a/motor/result` | `std_msgs/msg/String` | Side A 命令處理結果 |
+| `/steering/side_b/motor/result` | `std_msgs/msg/String` | Side B 命令處理結果 |
+| `/steering/side_a/status` | `std_msgs/msg/String` | Side A MCU 原始回覆 |
+| `/steering/side_b/status` | `std_msgs/msg/String` | Side B MCU 原始回覆 |
+| `/steering/side_a/left_steering/feedback_deg` 等 | `std_msgs/msg/Float64` | **每側本地** M1/M2 的相對角度回授；並非四馬達統一順序陣列 |
 
-**目前不支援**：`m1;stop`（僅支援 `all;stop`）、`disable`、`brakeon`、`brakeoff`、安全連續 `jog`／`jogstop`。`all` 的雙馬達命令是**逐顆傳送**，非原子操作；若一顆成功另一顆逾時，可能發生部分執行。
+共用 Bridge 還保留 Side-scoped legacy Topics（`/steering/<side>/control`、`/steering/<side>/command`、`/steering/<side>/left_steering/command_deg`、`/steering/<side>/right_steering/command_deg`）。日常測試請優先使用 `/steering/four/command`，避免多個命令來源互相干擾。
 
-## 6. 指令快速複製範例
-
-**Terminal 4 — 發送命令**：
+**監看輸出**（另開 Terminal）：
 
 ```bash
 source /opt/ros/humble/setup.bash
-
-# 1. 查詢
-ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;status'}"
-ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;position'}"
-
-# 2. 僅當零點無效、且機構已正確對正與安全失能時執行
-ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;sethome'}"
-
-# 3. 確認兩顆 REF_VALID=1 後致能
-ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;enable'}"
-
-# 4. 小角度測試（先確認狀態、安全距離與停止手段）
-ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;A[10,-10];S100'}"
-
-# 5. 回到零點
-ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;home;S100'}"
-
-# 6. 請求兩顆 Quick Stop
-ros2 topic pub --once /motor/command std_msgs/msg/String "{data: 'all;stop'}"
+ros2 topic echo /steering/four/result
+# 另一個 Terminal：
+ros2 topic echo /steering/four/status
 ```
 
-可選：在 Bash 建立簡寫函式（只在目前 Terminal 生效）：
+## 5. 建議台架操作順序
+
+> 以下為受控台架測試程序。每次開始前確認實際輪叉機械方向、保護空間、供電電壓、電源限流狀態與**獨立硬體停機措施**。不要把字串 `SAFE=1` 視為安全認證。
+
+1. 完成電源、線路、USB、CAN 終端與機構檢查；確保原先沒有尚未排除的 MCU/驅動器故障。
+2. 啟動 Side A、Side B、V5。先只讀查詢 `all;status`、`all;position`，確認 CAN 及位置回覆正常。
+3. 核對每個輪叉的**機械零位**。`REF_VALID=1` 只表示 STM32 中有暫時零點，不保證它是車輪正前方。
+4. 如需 `sethome`，請確保**實體已完全停止、沒有待執行角度指令**；目前 Bridge 會送 `M1:ZERO/M2:ZERO`，但是否可在 Enabled 狀態設零須由**實際 STM32 韌體**決定。未確認韌體規則前，勿在 Enabled 或運動中強制設零。
+5. 如未 Enable，且韌體要求的零點和 Heartbeat 等條件已滿足，執行 `all;enable`；確認兩側 `OK ENABLE VERIFIED`，並以 `all;status` 查 CiA402 狀態。
+6. 先做**單馬達、小角度、低設定速度**測試，確認方向與實體到位；再測四馬達不同角度與低速聯合動作。
+7. 查詢 `all;position`，確認四顆均 `REF_VALID=1`、`MOVING=0`、`REL_STEPS` 符合目標，並用外部角度工具核對機械轉角。
+
+**不要假定每次啟動都需要重做 `sethome`**：只重啟 Python Bridge，一般不會清除 STM32 的 RAM 零點；STM32 復位／斷電後則需重新確認。增量編碼器不提供斷電後的絕對輪叉方向；即使系統將開機位置當作計數零點，也不等於機械正前方。
+
+## 6. 常用四馬達指令
+
+指令格式：`m1|m2|m3|m4|all;動作[;S速度]`。`A` = 以目前軟體零點為基準的**絕對目標**，`a` = **相對目前位置**；目前只支援整數度。
+
+| 指令 | 用途 |
+|---|---|
+| `all;status` | 兩側 STM32 的 STATUS + 各馬達 PROBE |
+| `all;position` | 四顆馬達位置查詢 |
+| `all;probe` | 查詢四個 CANopen 節點 |
+| `all;sethome` | 各馬達當前位置設為暫時零點（是否允許取決於韌體狀態） |
+| `all;enable` | 兩側依序執行每側馬達 Enable，並驗證 CiA402 |
+| `m3;A10;S100` | 控制全域 Motor 3 至 +10°，預設映射 Side B 本地 `m1` |
+| `all;A[10,-10,10,-10];S100` | 四顆分別至 +10°、−10°、+10°、−10° |
+| `all;A-90;S700` | 四顆至 −90°，相同速度設定（僅在機械行程允許的台架情況使用） |
+| `all;a[1,-1,1,-1];S100` | 四顆相對移動指定角度 |
+| `all;home;S100` | 四顆返回目前軟體零點 |
+| `all;stop` | 向兩側請求 Quick Stop；**不是 E-stop** |
+
+命令範例：
 
 ```bash
-motorcmd() {
-  ros2 topic pub --once /motor/command std_msgs/msg/String "{data: '$1'}"
+# 只讀查詢
+ros2 topic pub --once /steering/four/command std_msgs/msg/String "{data: 'all;status'}"
+ros2 topic pub --once /steering/four/command std_msgs/msg/String "{data: 'all;position'}"
+
+# 只有在機械零點已確認、滿足 MCU ZERO 條件時才使用
+ros2 topic pub --once /steering/four/command std_msgs/msg/String "{data: 'all;sethome'}"
+
+# 需要致能時；請先確認韌體前置條件與機械安全
+ros2 topic pub --once /steering/four/command std_msgs/msg/String "{data: 'all;enable'}"
+
+# 運動指令（僅在全部檢查通過、獨立停機方式就緒時）
+ros2 topic pub --once /steering/four/command std_msgs/msg/String "{data: 'm1;A1;S100'}"
+
+# 軟體 Quick Stop 請求
+ros2 topic pub --once /steering/four/command std_msgs/msg/String "{data: 'all;stop'}"
+```
+
+可用 Bash 函式減少輸入：
+
+```bash
+steercmd() {
+  ros2 topic pub --once /steering/four/command std_msgs/msg/String "{data: '$1'}"
 }
-
-motorcmd 'all;status'
-motorcmd 'all;position'
-motorcmd 'all;sethome'
-motorcmd 'all;enable'
-motorcmd 'all;A[10,-10];S100'
-motorcmd 'all;stop'
+steercmd 'all;status'
+steercmd 'all;position'
 ```
 
-## 7. 常見錯誤與處理
+**V5 對全域 `all;A[...]` 的四個值依全域 `m1,m2,m3,m4` 排序**；它會依配置把兩顆一組送給各側 Bridge，並不保證兩側同時起轉。
 
-| 訊息／現象 | 可能原因 | 建議處理 |
-|---|---|---|
-| `ERR INIT: ZERO + HEARTBEAT REQUIRED` | `REF_VALID=0`、HB 逾時、CAN 不可用或仍在運動 | 先查 `all;position`、`all;status`；若零點無效，確認機械對正後再設零點 |
-| `REF_VALID=0` | STM32 重新啟動／燒錄，RAM 零點失效 | 不要直接 Enable；先重新確認實體零點與 `sethome` |
-| `ERR FORMAT use M1: or M2:` | STM32 收到格式異常的 UART 資料 | 檢查 UART IRQ、Ring Buffer、線路及指令來源，不要盲目重送運動 |
-| `ERR UART RESPONSE TIMEOUT: M2:A...` | Python 未如期收到回覆；**馬達可能已執行** | 不要立即重發；先用硬體手段確保停止，再查位置與驅動器狀態 |
-| `REJECTED: ENABLE/ZERO/BUSY/LIMIT` | 尚未致能／零點無效／仍在運動／超出限位或速度限制 | 檢查 READY、REF_VALID、MOVING、角度及速度設定 |
-| `READY=0` 但 Statusword 顯示 Operation Enabled | MCU 內部旗標與驅動器實際狀態不一致 | 禁止繼續運動；確認安全失能並排查狀態同步 |
+## 7. 回覆判讀與實際到位
 
-## 8. 其他 ROS 2 Topics 與注意事項
+| 訊息 | 正確解讀 |
+|---|---|
+| `ROUTED side_a: ...` | V5 已發布到 Side A 的 ROS Topic，**不是完成動作** |
+| `side_a: QUEUED ...` | Side A Bridge 已排入佇列 |
+| `OK M# ACCEPT ANGLE=...` | STM32 接受了對應角度請求 |
+| `OK COMMAND COMPLETED (accepted; motion may still be running)` | 該側 Bridge 指令交易完成，不代表實際角度到位 |
+| `OK ENABLE VERIFIED ...` | 該側已依 CiA402 Statusword 驗證 Enable；不代表物理煞車已獨立驗證 |
+| `REF_VALID=1` | RAM 軟體零點有效，不保證機械零點正確 |
+| `MOVING=0` | MCU 回報未在運動；仍需確認實際機械狀態 |
+| `STATUSWORD=0x0337` | 先前台架曾觀察到的 Operation Enabled 狀態範例；可用 `(word & 0x006F)==0x0027` 判定 CiA402 核心狀態 |
 
-| Topic | 型別 | 用途 |
-|---|---|---|
-| `/motor/command` | `std_msgs/msg/String` | 發送分號格式的 Command |
-| `/motor/result` | `std_msgs/msg/String` | Bridge 佇列、確認、錯誤回報 |
-| `/steering/status` | `std_msgs/msg/String` | STM32 原始回覆、位置與狀態 |
-| `/left_steering/feedback_deg` | `std_msgs/msg/Float64` | M1 相對角度回授 |
-| `/right_steering/feedback_deg` | `std_msgs/msg/Float64` | M2 相對角度回授 |
-| `/left_steering/command_deg` | `std_msgs/msg/Float64` | 舊有 M1 角度命令介面 |
-| `/right_steering/command_deg` | `std_msgs/msg/Float64` | 舊有 M2 角度命令介面 |
-| `/steering/command` | `std_msgs/msg/Float64MultiArray` | 舊有雙馬達角度命令介面 |
-| `/steering/control` | `std_msgs/msg/String` | 舊有控制介面 |
+先前台架記錄已顯示：四顆馬達完成 Enable、接受 −90°→+90°→0°（S700）的指令，最後四顆 `REL_STEPS` 接近 0、`REF_VALID=1`、`MOVING=0`。**這是先前實驗觀察，不是每次開機後自動成立**；也尚未驗證實際輪叉角度、額定負載轉矩、完整同步與可靠性。
 
-`/motor/result` 的 `OK COMMAND COMPLETED (accepted; motion may still be running)` 只代表 Bridge 本次指令流程已完成，**不代表機械運動已到位**。應觀察 `/steering/status` 中的 `REACHED`、`MOVING=0` 與實際位置，並在重要動作時做外部機械確認。`OK ENABLE VERIFIED` 只驗證 CiA402 狀態，**不獨立驗證實體磁煞車是否釋放**。
+位置理論換算目前為 `20000 steps ≈ 1°`，但輸出軸實際角度、減速機間隙及安裝誤差仍要外部量測。`S1`～`S1000` 是韌體接受的**設定值**，不是已驗證的輪叉 RPM。
+
+## 8. 已知問題與故障排查
+
+| 訊息／狀況 | 可能原因、建議 |
+|---|---|
+| `ERR M3/M4 POS FAILED` | STM32/CANopen 位置讀取失敗；先檢查驅動器電源、CAN、狀態及 MCU 原始錯誤，不要立即重發運動 |
+| `ERR UART RESPONSE TIMEOUT: M1/M2:POS` | V4 等待回覆超時；可能是真正沒有回覆，也可能是收到 `ERR ... POS FAILED` 卻未被舊版匹配邏輯結束 |
+| `ERR POSITION_FEEDBACK QUICKSTOP BOTH` | MCU 位置回饋異常而要求停止；需查原始故障，不應直接忽略 |
+| `ERR HOST_TIMEOUT QUICKSTOP BOTH` | STM32 未在規定時間收到 Host Heartbeat；可能與 UART 查詢逾時或其他阻塞有關，需查時間戳 |
+| `ERR UART_RX_FAULT QUICKSTOP BOTH` | MCU UART 接收故障，停止運動並排查串口通訊 |
+| `ERR INIT: ZERO + HEARTBEAT REQUIRED` | Firmware 拒絕 Enable；檢查 RAM 零點、Host HB、CAN、MOVING/其他實作前置條件；不能只根據字面認定單一原因 |
+| `REF_VALID=0` | RAM 參考零點無效；重新確認真實輪叉方向後才設零 |
+| Side A/B 回覆錯位 | 檢查 V5 `side_*_nodes`、Bridge `node_ids` 和 STM32 燒錄配置是否三者一致 |
+| 電源進入 CC／電壓下跌 | 四台 BLVD-KRD 共用電源、瞬時電流可能達限流；停止高負載測試並記錄供電，不能單靠提高設定來掩蓋故障 |
+
+### 8.1 POS FAILED 軟體問題（版本確認必讀）
+
+**本次用來核對 README 的 `bridge_sidea.py` 原始碼，對 `position` / `poll` 的匹配仍只接受成功的 `OK ... POS`，沒有完成 `ERR M# POS FAILED` 匹配修正。** 所以不要把此版本視為已修好的 Bridge。如果部署了後續修補包，必須再檢查實際部署檔案與版本，而不是僅憑 ZIP 名稱判斷。
+
+修正範圍應限於共用 Bridge 的回覆識別及失敗處理；V5 Router 不需要因此增加自動 STATUS 刷新。**修正回覆匹配不等於消除底層 CANopen POS FAILED。**
+
+### 8.2 目前測試電源
+
+先前記錄：GW Instek SPD-3606，單主通道設定約 24V，四台 BLVD-KRD 並聯共用；曾使用 2.15A 限流，後續提高至 3.0A 進行台架測試。3.0A 是**四台合計**的上限，不是每台的上限。SPD-3606 的 30V/6A 量程允許設置 3.0A，但並不保證可支援四馬達負載／峰值工況；應觀察 CV/CC 與驅動器端電壓，並核對線材、保護器件及設備額定值。
+
+## 9. Set Home 與增量編碼器的重要限制
+
+- 增量編碼器在失去供電後通常無法自己提供**機械絕對方向**；控制器重新起始計數不代表輪叉真的回到正前方。
+- 本系統的 `sethome` 是**暫時軟體零點**，只在正確機械位置確認後才有意義。它不是 Homing Sensor，自動零點與物理零點不同。
+- 你希望在 Enabled 且靜止時重設零點，**Bridge 的 `sethome` 命令路由本身沒有禁止**；但是否接受、會否產生意外轉動，須核對實際 STM32 `ZERO` 實作。**目前提供的三份 Python 檔沒有包含 MCU 韌體，不能確定 Enabled 狀態可否安全設零。**
+- `all;stop` 是 Quick Stop，並不等於 Driver Disable；不能拿它當成「已安全失能，可以設零」的證明。
+- 若要做正式農田自主轉向，建議另加輪叉絕對位置量測或原點感測與開機標定程序。
+
+## 10. 目前完成與待完成
+
+**已由先前台架 Log 驗證**：V5 Router 對兩側 Topic 分派、兩塊 STM32 的多馬達 Enable 交易、四顆馬達收到角度命令，四顆在最後返回軟體零點，並持續回報位置。
+
+**仍待驗證／完善**：最新版三檔部署後的長時可靠性、POS FAILED 回覆修補的硬體復測、實體輪叉角度、零位持久性、S1000 時的位置回饋與供電、機械負載轉矩、機械極限、跨側故障聯鎖、四顆精確同步與硬體安全停機。
 
 ---
 
-**已驗證的台架操作**：兩顆可完成 `sethome → enable → A[10,-10] → A0` 的角度回授流程。**仍待驗證**：不同負載下的實際角度精度、速度單位、硬體停止能力、機械限位、線束扭轉與長時間可靠性。
+> **維護原則**：四馬達的控制入口保持 V5 Simple Router；`bridge_sidea.py` 維護唯一的底層 Bridge 控制實現；`bridge_sideb.py` 僅為入口。不要回到 V3/V4 混用，也不要為修復單一 UART 錯誤把 Router 再度改成另一套狀態控制器。
